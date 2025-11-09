@@ -2,3 +2,4 @@ output*.html
 .idea
 .vscode
 .DS_Store
+porcupine-check
