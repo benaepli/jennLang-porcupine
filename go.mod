@@ -1,4 +1,4 @@
-module example.com/porcupine-check
+module github.com/benaepli/jennlang-porcupine
 
 go 1.24.9
 

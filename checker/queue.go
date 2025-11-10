@@ -1,4 +1,4 @@
-package main
+package checker
 
 import (
 	"fmt"
@@ -7,22 +7,21 @@ import (
 	"github.com/anishathalye/porcupine"
 )
 
-type qInput struct {
+// QueueInput represents an input to a queue operation
+type QueueInput struct {
 	Op  string // "ENQ" or "DEQ"
 	Val string // for ENQ: the string to enqueue; for DEQ: unused
 }
 
-// We’ll store outputs as strings. For ENQ we don't check the output.
-// For DEQ we require it equals the head element (or "<empty>" if queue empty).
-
-func queueModel() porcupine.Model {
+// QueueModel returns a porcupine.Model for a FIFO queue
+func QueueModel() porcupine.Model {
 	return porcupine.Model{
 		// State is a FIFO queue of strings
 		Init: func() interface{} { return []string{} },
 
 		Step: func(state, input, output interface{}) (bool, interface{}) {
-			q := append([]string{}, state.([]string)...) // copy
-			in := input.(qInput)
+			q := append([]string{}, state.([]string)...)
+			in := input.(QueueInput)
 			out := ""
 			out, _ = output.(string)
 
@@ -50,7 +49,6 @@ func queueModel() porcupine.Model {
 			}
 		},
 
-		// compare each char
 		Equal: func(a, b interface{}) bool {
 			x := a.([]string)
 			y := b.([]string)
@@ -65,9 +63,8 @@ func queueModel() porcupine.Model {
 			return true
 		},
 
-		// better labels in visualization
 		DescribeOperation: func(input, output interface{}) string {
-			in := input.(qInput)
+			in := input.(QueueInput)
 			switch strings.ToUpper(in.Op) {
 			case "ENQ":
 				return fmt.Sprintf("ENQ(%q)", in.Val)

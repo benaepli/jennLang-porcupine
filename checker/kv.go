@@ -1,4 +1,4 @@
-package main
+package checker
 
 import (
 	"fmt"
@@ -9,10 +9,11 @@ import (
 	"github.com/anishathalye/porcupine"
 )
 
-type kvInput struct {
-	Op  string // "Get" / "Put" / "Delete"
+// KVInput represents an input to a key-value store operation
+type KVInput struct {
+	Op  string // "GET" / "PUT" / "DELETE"
 	Key string // the key
-	Val string // for "Add" Ops
+	Val string // for "PUT" ops
 }
 
 const (
@@ -22,17 +23,14 @@ const (
 	readNil = "{\"type\":\"VOption\",\"value\":null}"
 )
 
-// We’ll store outputs as strings. For ENQ we don't check the output.
-// For DEQ we require it equals the head element (or "<empty>" if queue empty).
-
-func kvModel() porcupine.Model {
+// KVModel returns a porcupine.Model for a key-value store
+func KVModel() porcupine.Model {
 	return porcupine.Model{
-		// State is a FIFO queue of strings
 		Init: func() interface{} { return map[string]string{} },
 
 		Step: func(state, input, output interface{}) (bool, interface{}) {
-			q := maps.Clone(state.(map[string]string)) // copy
-			in := input.(kvInput)
+			q := maps.Clone(state.(map[string]string))
+			in := input.(KVInput)
 			out := ""
 			out, _ = output.(string)
 
@@ -60,14 +58,12 @@ func kvModel() porcupine.Model {
 			}
 		},
 
-		// compare each name space
 		Equal: func(a, b interface{}) bool {
 			return maps.Equal(a.(map[string]string), b.(map[string]string))
 		},
 
-		// better labels in visualization
 		DescribeOperation: func(input, output interface{}) string {
-			in := input.(kvInput)
+			in := input.(KVInput)
 			switch strings.ToUpper(in.Op) {
 			case "PUT":
 				return fmt.Sprintf("PUT <(%q), (%q)>", in.Key, in.Val)

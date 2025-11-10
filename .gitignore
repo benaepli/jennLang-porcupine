@@ -3,3 +3,5 @@ output*.html
 .vscode
 .DS_Store
 porcupine-check
+.claude
+jennlang-porcupine
