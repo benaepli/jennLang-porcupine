@@ -1,3 +1,5 @@
-call_ns,return_ns,client_id,op,key,value,output
-1,5,0,PUT,k1,apple,
-2,3,1,GET,k1,,NotFound
+UniqueID,ClientID,Kind,Action,Payload1,Payload2,Payload3
+0,0,Invocation,32_write,,"{""type"":""VString"",""value"":""k1""}","{""type"":""VString"",""value"":""apple""}"
+0,0,Response,32_write,"{""type"":""VTuple"",""value"":[]}",,
+1,1,Invocation,33_read,,"{""type"":""VString"",""value"":""k1""}",
+1,1,Response,33_read,"{""type"":""VOption"",""value"":null}",,

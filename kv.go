@@ -15,6 +15,13 @@ type kvInput struct {
 	Val string // for "Add" Ops
 }
 
+const (
+	// The expected output of a successful write
+	writeOutput = "{\"type\":\"VTuple\",\"value\":[]}"
+	// The expected output of a read on a non-existent key
+	readNil = "{\"type\":\"VOption\",\"value\":null}"
+)
+
 // We’ll store outputs as strings. For ENQ we don't check the output.
 // For DEQ we require it equals the head element (or "<empty>" if queue empty).
 
@@ -31,18 +38,18 @@ func kvModel() porcupine.Model {
 
 			switch strings.ToUpper(in.Op) {
 			case "PUT":
-				q[in.Key] = in.Val
-				// Enqueue: accept any output (often empty)
+				wrappedVal := fmt.Sprintf("{\"type\":\"VOption\",\"value\":%s}", in.Val)
+				q[in.Key] = wrappedVal
 				return true, q
 
 			case "GET":
 				v, ok := q[in.Key]
 
 				if !ok {
-					return out == "NotFound", q //if key doesn't exist
+					return out == readNil, q
 				}
-
 				return out == v, q
+
 			case "DELETE":
 				delete(q, in.Key)
 				return true, q
@@ -90,7 +97,7 @@ func kvModel() porcupine.Model {
 				if i > 0 {
 					b.WriteString(", ")
 				}
-				fmt.Fprintf(&b, "%s:%s", k, m[k])
+				_, _ = fmt.Fprintf(&b, "%s:%s", k, m[k])
 			}
 			b.WriteString("}")
 			return b.String()
