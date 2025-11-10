@@ -1,6 +1,7 @@
 import pandas as pd
 import csv
 import io
+import argparse # Import argparse
 
 # --- Helper Functions ---
 
@@ -26,48 +27,25 @@ def get_op_output():
 
 # --- Main Conversion Logic ---
 
-# 1. Define the input CSV data from your prompt
-csv_data = """call_ns,return_ns,client_id,op,key,value,output
-1000,5000,0,PUT,k1,apple,
-1500,4500,2,PUT,k2,banana,
-2000,3000,1,GET,k1,,NotFound
-2000,7000,10,PUT,k4,egg,
-3000,8000,8,PUT,k3,dog,
-4600,5200,3,GET,k2,,banana
-4700,6000,6,DELETE,k2,,
-5100,9000,4,PUT,k1,cherry,
-6100,6500,7,GET,k2,,NotFound
-7100,7200,11,GET,k4,,egg
-8100,8300,9,GET,k3,,dog
-9200,10000,5,GET,k1,,cherry
-10050,10500,0,GET,k1,,cherry
-6600,7300,1,PUT,k2,fig,
-7400,7600,3,GET,k2,,fig
-9050,9300,2,GET,k1,,cherry
-11000,12000,4,DELETE,k1,,
-12100,12500,5,GET,k1,,NotFound
-12600,13000,6,PUT,k5,ham,
-13100,13300,7,GET,k5,,ham
-8400,9500,8,PUT,k3,iguana,
-9600,9800,9,GET,k3,,iguana
-7250,7400,10,DELETE,k4,,
-7450,7600,11,GET,k4,,NotFound
-"""
+# 1. Set up command-line argument parsing
+parser = argparse.ArgumentParser(description="Convert a simple history CSV to the spec format.")
+parser.add_argument("-i", "--input", required=True, help="Path to the input CSV file (e.g., complex_history.csv)")
+parser.add_argument("-o", "--output", required=True, help="Path for the converted output CSV file (e.g., complex_history_converted.csv)")
+args = parser.parse_args()
 
-# 2. Save the data to a file (so we can read it with pandas)
-input_filename = "examples/oldkv/sync-1.csv"
-with open(input_filename, "w") as f:
-    f.write(csv_data)
+# Use the filenames from the arguments
+input_filename = args.input
+output_filename = args.output
 
 try:
-    # 3. Load the input CSV
+    # 2. Load the input CSV from the provided filename
     df = pd.read_csv(input_filename)
     df.columns = [col.strip().lower() for col in df.columns]
 
     print(f"--- Loaded {input_filename} ---")
     print(f"Found {len(df)} operations.")
 
-    # 4. Iterate and transform
+    # 3. Iterate and transform
     new_rows = []
     target_headers = ["UniqueID", "ClientID", "Kind", "Action", "Payload1", "Payload2", "Payload3"]
 
@@ -105,16 +83,16 @@ try:
         # Add the Response row
         new_rows.append([uid, client_id, "Response", action, p1_resp, p2_resp, p3_resp])
 
-    # 5. Create new DataFrame and save to CSV
+    # 4. Create new DataFrame and save to CSV
     converted_df = pd.DataFrame(new_rows, columns=target_headers)
-    output_filename = "complex_history_converted.csv"
 
-    # Use QUOTE_MINIMAL to avoid unnecessary quotes
     converted_df.to_csv(output_filename, index=False, quoting=csv.QUOTE_MINIMAL)
 
     print(f"\n--- Conversion Successful ---")
     print(f"Converted {len(df)} operations into {len(converted_df)} event rows.")
     print(f"Saved to: {output_filename}")
 
+except FileNotFoundError:
+    print(f"ERROR: Input file not found at {input_filename}")
 except Exception as e:
     print(f"An error occurred: {e}")
