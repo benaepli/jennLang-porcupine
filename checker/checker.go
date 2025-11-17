@@ -19,11 +19,11 @@ const (
 
 func (e *ActionType) UnmarshalCSV(value string) error {
 	switch {
-	case strings.HasSuffix(value, "_read"):
+	case strings.HasSuffix(value, "ClientInterface.Read"):
 		*e = Read
-	case strings.HasSuffix(value, "_write"):
+	case strings.HasSuffix(value, "ClientInterface.Write"):
 		*e = Write
-	case strings.HasSuffix(value, "_delete"):
+	case strings.HasSuffix(value, "ClientInterface.Delete"):
 		*e = Delete
 	default:
 		*e = "Unknown operation."
