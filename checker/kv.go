@@ -173,170 +173,49 @@ func cloneLogs(m map[string][]int) map[string][]int {
 	return out
 }
 
-// RMWLogEntry represents one entry in the kv_rmw tagged append-log.
-// PrevUid is nil for blind PUTs and Some(prior_tail_uid) for RMWs.
-type RMWLogEntry struct {
-	PrevUid *int
-	Uid     int
-}
-
-// parseRMWUidList parses a Read response payload into []RMWLogEntry.
-// Accepts a VList of VTuple(VOption(VInt), VInt). Empty/absent values yield nil.
-func parseRMWUidList(v Value) ([]RMWLogEntry, bool) {
-	switch v.Type {
-	case "":
-		return nil, true
-	case "VOption":
-		if string(v.Raw) == "null" {
-			return nil, true
-		}
-		var inner Value
-		if err := json.Unmarshal(v.Raw, &inner); err != nil {
-			return nil, false
-		}
-		return parseRMWUidList(inner)
-	case "VList":
-		var items []Value
-		if err := json.Unmarshal(v.Raw, &items); err != nil {
-			return nil, false
-		}
-		out := make([]RMWLogEntry, len(items))
-		for i, it := range items {
-			entry, ok := parseRMWLogEntry(it)
-			if !ok {
-				return nil, false
-			}
-			out[i] = entry
-		}
-		return out, true
-	}
-	return nil, false
-}
-
-// parseRMWLogEntry parses a single VTuple(VOption(VInt), VInt) entry.
-func parseRMWLogEntry(v Value) (RMWLogEntry, bool) {
-	if v.Type != "VTuple" {
-		return RMWLogEntry{}, false
-	}
-	var items []Value
-	if err := json.Unmarshal(v.Raw, &items); err != nil || len(items) != 2 {
-		return RMWLogEntry{}, false
-	}
-	prev, ok := parseOptionalVInt(items[0])
-	if !ok {
-		return RMWLogEntry{}, false
-	}
-	uid, ok := parseVInt(items[1])
-	if !ok {
-		return RMWLogEntry{}, false
-	}
-	return RMWLogEntry{PrevUid: prev, Uid: uid}, true
-}
-
-// parseOptionalVInt parses VOption<VInt>: returns (nil, true) for None,
-// (&n, true) for Some(n), and (_, false) on type errors.
-func parseOptionalVInt(v Value) (*int, bool) {
-	if v.Type != "VOption" {
-		return nil, false
-	}
-	if string(v.Raw) == "null" {
-		return nil, true
-	}
-	var inner Value
-	if err := json.Unmarshal(v.Raw, &inner); err != nil {
-		return nil, false
-	}
-	n, ok := parseVInt(inner)
-	if !ok {
-		return nil, false
-	}
-	return &n, true
-}
-
-func rmwLogEqual(a, b []RMWLogEntry) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i].Uid != b[i].Uid {
-			return false
-		}
-		switch {
-		case a[i].PrevUid == nil && b[i].PrevUid == nil:
-			// equal
-		case a[i].PrevUid == nil || b[i].PrevUid == nil:
-			return false
-		case *a[i].PrevUid != *b[i].PrevUid:
-			return false
-		}
-	}
-	return true
-}
-
-func formatRMWLog(xs []RMWLogEntry) string {
-	parts := make([]string, len(xs))
-	for i, x := range xs {
-		if x.PrevUid == nil {
-			parts[i] = fmt.Sprintf("(_, %d)", x.Uid)
-		} else {
-			parts[i] = fmt.Sprintf("(%d, %d)", *x.PrevUid, x.Uid)
-		}
-	}
-	return "[" + strings.Join(parts, ", ") + "]"
-}
-
-func cloneRMWLogs(m map[string][]RMWLogEntry) map[string][]RMWLogEntry {
-	out := make(map[string][]RMWLogEntry, len(m))
-	for k, v := range m {
-		cp := make([]RMWLogEntry, len(v))
-		copy(cp, v)
-		out[k] = cp
-	}
-	return out
-}
-
-// KVRMWModel returns a porcupine.Model for an append-log kv store with RMW.
-// State: map[key] -> ordered list of (prev_uid, uid) entries.
-//   - PUT(key, uid): appends (nil, uid). Always valid in the model.
-//   - RMW(key, uid): appends (tail_uid?, uid) where tail_uid is the uid of the
-//     current tail (or nil if empty). Always valid in the model — the model
-//     authoritatively records what prev_uid the linearization implies.
-//   - GET(key) -> [(prev?, uid)]: must equal state[key], including prev_uid
-//     fields. A protocol that wrote a wrong prev_uid is caught here.
-//
-// Validation is deferred to GET: a run with RMWs but no GETs cannot detect
-// incorrect prev_uid choices.
+// KVRMWModel returns a porcupine.Model for a kv store with three operations:
+// blind Write (PUT), append-and-return-old RMW, and Read (GET).
+// State: map[key] -> list of uids (same shape as KVModel).
+//   - PUT(key, uid): blind overwrite — state[key] = [uid]. No output check.
+//   - RMW(key, uid): old = state[key]; state[key] = append(old, uid). Output
+//     must equal old. A nil output (pending invocation) skips the check.
+//   - GET(key) -> []uid: must equal state[key].
 func KVRMWModel() porcupine.Model {
 	return porcupine.Model{
-		Init: func() interface{} { return map[string][]RMWLogEntry{} },
+		Init: func() interface{} { return map[string][]int{} },
 
 		Step: func(state, input, output interface{}) (bool, interface{}) {
-			q := cloneRMWLogs(state.(map[string][]RMWLogEntry))
+			q := cloneLogs(state.(map[string][]int))
 			in := input.(KVInput)
 
 			switch strings.ToUpper(in.Op) {
 			case "PUT":
-				q[in.Key] = append(q[in.Key], RMWLogEntry{PrevUid: nil, Uid: in.Uid})
+				q[in.Key] = []int{in.Uid}
 				return true, q
 
 			case "RMW":
-				log := q[in.Key]
-				var prev *int
-				if len(log) > 0 {
-					tail := log[len(log)-1].Uid
-					prev = &tail
+				old := q[in.Key]
+				next := make([]int, len(old)+1)
+				copy(next, old)
+				next[len(old)] = in.Uid
+				q[in.Key] = next
+				if output == nil {
+					return true, q
 				}
-				q[in.Key] = append(log, RMWLogEntry{PrevUid: prev, Uid: in.Uid})
-				return true, q
-
-			case "GET":
 				outStr, _ := output.(string)
-				outVal := ParseValue(outStr)
-				observed, ok := parseRMWUidList(outVal)
+				observed, ok := parseUidList(ParseValue(outStr))
 				if !ok {
 					return false, q
 				}
-				return rmwLogEqual(observed, q[in.Key]), q
+				return uidListEqual(observed, old), q
+
+			case "GET":
+				outStr, _ := output.(string)
+				observed, ok := parseUidList(ParseValue(outStr))
+				if !ok {
+					return false, q
+				}
+				return uidListEqual(observed, q[in.Key]), q
 
 			default:
 				return false, state
@@ -344,14 +223,14 @@ func KVRMWModel() porcupine.Model {
 		},
 
 		Equal: func(a, b interface{}) bool {
-			ma := a.(map[string][]RMWLogEntry)
-			mb := b.(map[string][]RMWLogEntry)
+			ma := a.(map[string][]int)
+			mb := b.(map[string][]int)
 			if len(ma) != len(mb) {
 				return false
 			}
 			for k, v := range ma {
 				v2, ok := mb[k]
-				if !ok || !rmwLogEqual(v, v2) {
+				if !ok || !uidListEqual(v, v2) {
 					return false
 				}
 			}
@@ -364,12 +243,17 @@ func KVRMWModel() porcupine.Model {
 			case "PUT":
 				return fmt.Sprintf("PUT '%s' <- %d", in.Key, in.Uid)
 			case "RMW":
-				return fmt.Sprintf("RMW '%s' <- %d", in.Key, in.Uid)
+				outStr, _ := output.(string)
+				outVal := ParseValue(outStr)
+				if list, ok := parseUidList(outVal); ok {
+					return fmt.Sprintf("RMW '%s' <- %d (old %s)", in.Key, in.Uid, formatUidList(list))
+				}
+				return fmt.Sprintf("RMW '%s' <- %d (old %s)", in.Key, in.Uid, outVal.String())
 			case "GET":
 				outStr, _ := output.(string)
 				outVal := ParseValue(outStr)
-				if list, ok := parseRMWUidList(outVal); ok {
-					return fmt.Sprintf("GET '%s' => %s", in.Key, formatRMWLog(list))
+				if list, ok := parseUidList(outVal); ok {
+					return fmt.Sprintf("GET '%s' => %s", in.Key, formatUidList(list))
 				}
 				return fmt.Sprintf("GET '%s' => %s", in.Key, outVal.String())
 			default:
@@ -378,7 +262,7 @@ func KVRMWModel() porcupine.Model {
 		},
 
 		DescribeState: func(state interface{}) string {
-			m := state.(map[string][]RMWLogEntry)
+			m := state.(map[string][]int)
 			keys := make([]string, 0, len(m))
 			for k := range m {
 				keys = append(keys, k)
@@ -390,7 +274,7 @@ func KVRMWModel() porcupine.Model {
 				if i > 0 {
 					b.WriteString(", ")
 				}
-				fmt.Fprintf(&b, "%s: %s", k, formatRMWLog(m[k]))
+				fmt.Fprintf(&b, "%s: %s", k, formatUidList(m[k]))
 			}
 			b.WriteString("}")
 			return b.String()

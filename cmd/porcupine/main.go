@@ -7,11 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/anishathalye/porcupine"
 	"github.com/gocarina/gocsv"
 
 	"github.com/benaepli/turnpike-porcupine/checker"
+	"github.com/benaepli/turnpike-porcupine/stats"
 )
 
 func main() {
@@ -21,6 +23,7 @@ func main() {
 	outputFile := flag.String("output", "", "Path for output HTML file (single run) or directory (all runs)")
 	outputDir := flag.String("output-dir", "", "Output directory for HTML files (when processing all runs)")
 	modelName := flag.String("model", "", "Model to check (e.g., 'kv', 'kv_rmw', 'queue') (required)")
+	timeoutMs := flag.Int("timeout", 0, "Per-run timeout in milliseconds (0 = no timeout)")
 	flag.Parse()
 
 	// Validate required flags
@@ -36,11 +39,6 @@ func main() {
 
 	// Get the model
 	var model porcupine.Model
-	// Note: the kv and kv_rmw models are NOT interchangeable. kv_rmw expects
-	// Read responses to be a VList of VTuple(VOption(VInt), VInt) — the per-key
-	// log of (prev_uid, uid) entries used by Gryff-style protocols. Specs
-	// targeting kv_rmw must store list<(int?, int)> and return that shape from
-	// ClientInterface.Read; specs storing list<int> belong with -model kv.
 	switch *modelName {
 	case "kv":
 		model = checker.KVModel()
@@ -57,7 +55,7 @@ func main() {
 		if *outputFile == "" {
 			log.Fatalln("Error: -output flag is required for CSV mode.")
 		}
-		processCSV(*inputFile, *outputFile, model)
+		processCSV(*inputFile, *outputFile, model, *timeoutMs)
 	} else {
 		// DuckDB mode
 		if *runID == -1 {
@@ -67,18 +65,18 @@ func main() {
 			if outDir == "" {
 				outDir = *outputFile
 			}
-			processAllRuns(*inputFile, outDir, model)
+			processAllRuns(*inputFile, outDir, model, *timeoutMs)
 		} else {
 			// Process single run
 			if *outputFile == "" {
 				log.Fatalln("Error: -output flag is required when checking a single run.")
 			}
-			processSingleRun(*inputFile, *runID, *outputFile, model)
+			processSingleRun(*inputFile, *runID, *outputFile, model, *timeoutMs)
 		}
 	}
 }
 
-func processCSV(inputFile, outputFile string, model porcupine.Model) {
+func processCSV(inputFile, outputFile string, model porcupine.Model, timeoutMs int) {
 	f, err := os.Open(inputFile)
 	if err != nil {
 		log.Fatalf("failed to open input file %s: %v", inputFile, err)
@@ -93,20 +91,20 @@ func processCSV(inputFile, outputFile string, model porcupine.Model) {
 	}
 
 	ops, annotations := checker.BuildOperationsWithAnnotations(eventRows)
-	checkAndVisualize(model, ops, annotations, outputFile, "CSV")
+	checkAndVisualize(model, ops, annotations, outputFile, "CSV", timeoutMs)
 }
 
-func processSingleRun(dbPath string, runID int, outputFile string, model porcupine.Model) {
+func processSingleRun(dbPath string, runID int, outputFile string, model porcupine.Model, timeoutMs int) {
 	eventRows, err := checker.ReadEventsFromDuckDB(dbPath, runID)
 	if err != nil {
 		log.Fatalf("failed to read events from DuckDB: %v", err)
 	}
 
 	ops, annotations := checker.BuildOperationsWithAnnotations(eventRows)
-	checkAndVisualize(model, ops, annotations, outputFile, fmt.Sprintf("Run %d", runID))
+	checkAndVisualize(model, ops, annotations, outputFile, fmt.Sprintf("Run %d", runID), timeoutMs)
 }
 
-func processAllRuns(dbPath, outputDir string, model porcupine.Model) {
+func processAllRuns(dbPath, outputDir string, model porcupine.Model, timeoutMs int) {
 	// Create output directory if specified and doesn't exist
 	if outputDir != "" {
 		if err := os.MkdirAll(outputDir, 0755); err != nil {
@@ -116,6 +114,7 @@ func processAllRuns(dbPath, outputDir string, model porcupine.Model) {
 
 	allLinearizable := true
 	runCount := 0
+	var results []stats.RunResult
 
 	err := checker.ProcessAllRunsFromDuckDB(dbPath, func(runID int, eventRows []*checker.EventRow) error {
 		runCount++
@@ -130,7 +129,18 @@ func processAllRuns(dbPath, outputDir string, model porcupine.Model) {
 		}
 
 		fmt.Printf("\n=== Checking Run %d ===\n", runID)
-		if !checkAndVisualize(model, ops, annotations, outFile, fmt.Sprintf("Run %d", runID)) {
+		start := time.Now()
+		linearizable := checkAndVisualize(model, ops, annotations, outFile, fmt.Sprintf("Run %d", runID), timeoutMs)
+		elapsed := time.Since(start)
+
+		results = append(results, stats.RunResult{
+			FileName:     fmt.Sprintf("run_%d", runID),
+			ElapsedTime:  elapsed,
+			Success:      true,
+			Linearizable: linearizable,
+		})
+
+		if !linearizable {
 			allLinearizable = false
 		}
 		return nil
@@ -144,6 +154,25 @@ func processAllRuns(dbPath, outputDir string, model porcupine.Model) {
 		return
 	}
 
+	// Print timing summary
+	st := stats.CalculateStats(results)
+	stats.PrintSummary(st)
+
+	// Print slow runs
+	slowThreshold := 5 * time.Second
+	var slowRuns []stats.RunResult
+	for _, r := range results {
+		if r.ElapsedTime > slowThreshold {
+			slowRuns = append(slowRuns, r)
+		}
+	}
+	if len(slowRuns) > 0 {
+		fmt.Printf("\n=== Slow Runs (>%v) ===\n", slowThreshold)
+		for _, r := range slowRuns {
+			fmt.Printf("  %s: %v (linearizable: %v)\n", r.FileName, r.ElapsedTime.Round(time.Millisecond), r.Linearizable)
+		}
+	}
+
 	fmt.Printf("\n=== Summary (%d runs) ===\n", runCount)
 	if allLinearizable {
 		fmt.Println("All runs are linearizable.")
@@ -153,15 +182,15 @@ func processAllRuns(dbPath, outputDir string, model porcupine.Model) {
 	}
 }
 
-func checkAndVisualize(model porcupine.Model, ops []porcupine.Operation, annotations []porcupine.Annotation, outputFile, label string) bool {
-	res, info := porcupine.CheckOperationsVerbose(model, ops, 0)
+func checkAndVisualize(model porcupine.Model, ops []porcupine.Operation, annotations []porcupine.Annotation, outputFile, label string, timeoutMs int) bool {
+	res, info := porcupine.CheckOperationsVerbose(model, ops, time.Duration(timeoutMs)*time.Millisecond)
 
 	if res == porcupine.Ok {
 		fmt.Printf("%s: Linearizable? true\n", label)
 	} else if res == porcupine.Illegal {
 		fmt.Printf("%s: Linearizable? false\n", label)
 	} else {
-		fmt.Printf("%s: Linearizable? Unknown (Check failed)\n", label)
+		fmt.Printf("%s: Unknown (check failed or timed out)\n", label)
 	}
 
 	// Add system event annotations (Crash/Recover/Timeout) as overlays
