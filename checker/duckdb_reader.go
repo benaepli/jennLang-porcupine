@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
-	_ "github.com/marcboeker/go-duckdb"
+	_ "github.com/marcboeker/go-duckdb/v2"
 )
 
 var (
@@ -37,11 +37,12 @@ func isParquetDir(path string) bool {
 // openDB opens an in-memory DuckDB when path is a Parquet directory, or opens
 // the DuckDB file directly otherwise.
 func openDB(path string) (*sql.DB, error) {
+	opts := duckDBDSNOptions()
 	if isParquetDir(path) {
 		// In-memory DuckDB – queries will use read_parquet() inline.
-		return sql.Open("duckdb", "")
+		return sql.Open("duckdb", opts)
 	}
-	return sql.Open("duckdb", path)
+	return sql.Open("duckdb", path+opts)
 }
 
 // executionsSource returns the SQL table expression for the executions relation.
