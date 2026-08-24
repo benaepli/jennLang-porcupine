@@ -3,4 +3,5 @@ output*.html
 .vscode
 .DS_Store
 benchmark
+mainbatch
 main
