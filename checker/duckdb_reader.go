@@ -143,9 +143,13 @@ func ProcessAllRunsFromDuckDB(dbPath string, processRun func(runID int, events [
 	defer db.Close()
 
 	src := executionsSource(dbPath)
+	// Timer firings are system events the checker discards as unknown
+	// actions; they can outnumber client operations many times over, so
+	// they are left in the store rather than read and dropped.
 	query := fmt.Sprintf(`
 		SELECT run_id, unique_id, client_id, kind, action, payload
 		FROM %s
+		WHERE kind <> 'TimerFired'
 		ORDER BY run_id ASC, seq_num ASC
 	`, src)
 
