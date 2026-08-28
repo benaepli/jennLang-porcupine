@@ -17,8 +17,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/anishathalye/porcupine"
@@ -37,6 +39,68 @@ type Result struct {
 	ViolatingRunIDs []int  `json:"violating_run_ids"`
 	UnknownRunIDs   []int  `json:"unknown_run_ids"`
 	WallMs          int64  `json:"wall_ms"`
+	// Position of the first violating run in run_id order (1-based) and its
+	// id, so a consumer can measure time to the first violation from the
+	// runs table. Absent when nothing violated.
+	FirstViolationOrdinal int  `json:"first_violation_ordinal,omitempty"`
+	FirstViolationRunID   *int `json:"first_violation_run_id,omitempty"`
+	// A structural fingerprint per violating run, capped, so distinct
+	// violations can be told apart from repeats of one.
+	ViolationSignatures []Signature `json:"violation_signatures,omitempty"`
+}
+
+// Signature identifies the shape of one violation: the operations the
+// longest partial linearization of each partition could not place.
+type Signature struct {
+	RunID     int    `json:"run_id"`
+	Ordinal   int    `json:"ordinal"`
+	Signature string `json:"signature"`
+}
+
+// The signature list is bounded so a corpus that violates everywhere does
+// not turn the summary into a dump.
+const maxSignatures = 200
+
+// violationSignature hashes what the checker could not linearize: per
+// partition, the size of the partition, the length of the longest partial
+// linearization, and the client and input of every operation outside it.
+// Two histories with the same unplaceable operations hash alike whatever
+// their run ids and timestamps.
+func violationSignature(modelName string, model porcupine.Model, ops []porcupine.Operation, info porcupine.LinearizationInfo) string {
+	h := fnv.New64a()
+	fmt.Fprintf(h, "%s|%d", modelName, len(ops))
+	parts := [][]porcupine.Operation{ops}
+	if model.Partition != nil {
+		parts = model.Partition(ops)
+	}
+	partials := info.PartialLinearizations()
+	for pi, part := range parts {
+		longest := []int{}
+		if pi < len(partials) {
+			for _, lin := range partials[pi] {
+				if len(lin) > len(longest) {
+					longest = lin
+				}
+			}
+		}
+		placed := make(map[int]bool, len(longest))
+		for _, id := range longest {
+			placed[id] = true
+		}
+		var outside []string
+		for id, op := range part {
+			if placed[id] {
+				continue
+			}
+			outside = append(outside, fmt.Sprintf("%d:%v", op.ClientId, op.Input))
+		}
+		sort.Strings(outside)
+		fmt.Fprintf(h, "|p%d:%d/%d:", pi, len(longest), len(part))
+		for _, o := range outside {
+			fmt.Fprintf(h, "%s;", o)
+		}
+	}
+	return fmt.Sprintf("%016x", h.Sum64())
 }
 
 func knownAction(a checker.ActionType) bool {
@@ -98,13 +162,23 @@ func main() {
 			}
 		}
 		ops, _ := checker.BuildOperationsWithAnnotations(kept)
-		verdict, _ := porcupine.CheckOperationsVerbose(model, ops, time.Duration(*timeoutMs)*time.Millisecond)
+		verdict, info := porcupine.CheckOperationsVerbose(model, ops, time.Duration(*timeoutMs)*time.Millisecond)
 		switch verdict {
 		case porcupine.Ok:
 			res.Ok++
 		case porcupine.Illegal:
 			res.Violations++
 			res.ViolatingRunIDs = append(res.ViolatingRunIDs, runID)
+			if res.FirstViolationRunID == nil {
+				id := runID
+				res.FirstViolationRunID = &id
+				res.FirstViolationOrdinal = res.TotalRuns
+			}
+			if len(res.ViolationSignatures) < maxSignatures {
+				res.ViolationSignatures = append(res.ViolationSignatures, Signature{
+					RunID: runID, Ordinal: res.TotalRuns, Signature: violationSignature(*modelName, model, ops, info),
+				})
+			}
 			if res.Violations <= 20 {
 				fmt.Fprintf(os.Stderr, "run %d: NOT linearizable\n", runID)
 			}
